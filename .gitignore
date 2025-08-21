@@ -1,0 +1,18 @@
+﻿# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Data & artifacts (reproducible via pipeline)
+data/cleaned_data.csv
+artifacts/
+*.npy
+
+# OS/Editor
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log

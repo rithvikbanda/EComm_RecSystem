@@ -1,104 +1,153 @@
-import pandas as pd
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import logging
+from pathlib import Path
+from typing import Iterable, List, Set
+
 import numpy as np
-import os
+import pandas as pd
 
-def load_and_clean_data(file_path):
-    """
-    Load and clean the retail data.
-    - Robust CSV decoding (utf-8, then latin1)
-    - Drop null CustomerID and cast to int
-    - Strip strings but keep true NaN (avoid turning NaN into the string "nan")
-    - Remove cancellations (InvoiceNo starting with 'C' or Quantity <= 0)
-    - Add TotalSpend
-    """
-    # Robust CSV load
-    try:
-        df = pd.read_csv(file_path, encoding="utf-8")
-    except UnicodeDecodeError:
-        df = pd.read_csv(file_path, encoding="latin1")
+# ================= Config =================
+DEFAULT_DATA_DIR = Path("data")
+DEFAULT_INPUT = DEFAULT_DATA_DIR / "data.csv"
+DEFAULT_OUTPUT = DEFAULT_DATA_DIR / "cleaned_data.csv"
 
-    print(f"Original data shape: {df.shape}")
+REQUIRED_COLS: Set[str] = {
+    "InvoiceNo",
+    "StockCode",
+    "Description",
+    "Quantity",
+    "InvoiceDate",
+    "UnitPrice",
+    "CustomerID",
+    "Country",
+}
 
-    # Clean
-    df = df.dropna(subset=["CustomerID"]).copy()
-    df["CustomerID"] = df["CustomerID"].astype(int)
+# ============== Logging ==============
+def setup_logging(level: str = "INFO") -> None:
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
 
-    # Keep true NaNs for Description/Country
+
+# ============== I/O Helpers ==============
+def read_csv_robust(path: Path) -> pd.DataFrame:
+    """Try UTF-8 then latin1 to avoid hard failures on mixed encodings."""
+    last_err = None
+    for enc in ("utf-8", "latin1"):
+        try:
+            return pd.read_csv(path, encoding=enc)
+        except UnicodeDecodeError as e:
+            last_err = e
+    raise last_err  # type: ignore[misc]
+
+
+def validate_schema(df: pd.DataFrame, required: Iterable[str] = REQUIRED_COLS) -> None:
+    missing = set(required) - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {sorted(missing)}")
+
+
+# ============== Cleaning Steps ==============
+def clean_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
+    """Apply production-leaning cleaning rules compatible with downstream steps."""
+    validate_schema(raw)
+
+    df = raw.copy()
+
+    # Basic hygiene
+    before = len(df)
+    df = df.drop_duplicates()
+    logging.info("Dropped %d duplicate rows", before - len(df))
+
+    # Drop rows missing key IDs
+    df = df.dropna(subset=["CustomerID", "StockCode", "InvoiceNo"])
+
+    # Normalize types
+    df["CustomerID"] = df["CustomerID"].astype("int64", errors="ignore")
     df["InvoiceNo"] = df["InvoiceNo"].astype(str).str.strip()
+    df["StockCode"] = df["StockCode"].astype(str).str.strip()
     df["Description"] = df["Description"].astype("string").str.strip()
     df["Country"] = df["Country"].astype("string").str.strip()
 
-    # Remove cancellations
+    # Parse dates; drop rows with unparseable dates
+    df["InvoiceDate"] = pd.to_datetime(df["InvoiceDate"], errors="coerce", utc=False)
+    bad_dates = df["InvoiceDate"].isna().sum()
+    if bad_dates:
+        logging.warning("Dropping %d rows with bad InvoiceDate", bad_dates)
+        df = df.dropna(subset=["InvoiceDate"])
+
+    # Remove cancellations (InvoiceNo starting with 'C')
+    before = len(df)
     df = df[~df["InvoiceNo"].str.startswith("C")]
-    df = df[df["Quantity"] > 0]
+    logging.info("Removed %d cancellation rows", before - len(df))
 
-    # Spend
-    df["TotalSpend"] = df["Quantity"] * df["UnitPrice"]
+    # Coerce numeric and filter invalids
+    df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
+    df["UnitPrice"] = pd.to_numeric(df["UnitPrice"], errors="coerce")
+    bad_numeric = df["Quantity"].isna().sum() + df["UnitPrice"].isna().sum()
+    if bad_numeric:
+        logging.warning("Found %d rows with non-numeric Quantity/UnitPrice -> dropping", bad_numeric)
+    df = df.dropna(subset=["Quantity", "UnitPrice"])
 
-    print(f"After cleaning: {df.shape}")
+    # Positive quantities & prices only
+    before = len(df)
+    df = df[(df["Quantity"] > 0) & (df["UnitPrice"] > 0)]
+    logging.info("Filtered %d rows with non-positive qty/price", before - len(df))
+
+    # Light winsorization to cap extreme outliers on UnitPrice
+    # (keeps demo stable while avoiding distorting downstream embeddings)
+    cap = df["UnitPrice"].quantile(0.999)
+    if pd.notna(cap) and cap > 0:
+        df.loc[df["UnitPrice"] > cap, "UnitPrice"] = cap
+
+    # Compute spend
+    df["TotalSpend"] = (df["Quantity"] * df["UnitPrice"]).round(2)
+
+    # Sort for determinism (useful for tests and reproducibility)
+    df = df.sort_values(["CustomerID", "InvoiceDate", "InvoiceNo", "StockCode"]).reset_index(drop=True)
+
     return df
 
-def _majority_value(s: pd.Series):
-    """
-    Return the statistical mode; if none, fall back to first non-null,
-    else NaN.
-    """
-    m = s.mode(dropna=True)
-    if len(m):
-        return m.iloc[0]
-    s_nonnull = s.dropna()
-    return s_nonnull.iloc[0] if len(s_nonnull) else np.nan
 
-def aggregate_customer_data(df: pd.DataFrame):
-    """
-    Aggregate purchases per customer (vectorized, fast).
-    - products: sorted unique product descriptions
-    - total_spent: sum of TotalSpend
-    - purchase_frequency: number of unique invoices (transactions)
-    - avg_spend_per_product: total_spent / unique_products_count
-    - country: majority country
-    """
-    g = df.groupby("CustomerID", as_index=True)
+# ============== CLI ==============
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Clean retail transactions into a stable CSV for embeddings/recs.")
+    p.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="Path to raw CSV (default: data/data.csv)")
+    p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Path to write cleaned CSV (default: data/cleaned_data.csv)")
+    p.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
+    return p.parse_args()
 
-    products = g["Description"].agg(lambda s: sorted(set(s.dropna())))
-    total_spent = g["TotalSpend"].sum().round(2)
-    purchase_frequency = g["InvoiceNo"].nunique()
-    unique_products_count = g["Description"].nunique(dropna=True)
-    country = g["Country"].apply(_majority_value)
 
-    avg_spend_per_product = (
-        total_spent / unique_products_count.replace(0, np.nan)
-    ).fillna(0).round(2)
+def main() -> None:
+    args = parse_args()
+    setup_logging(args.log_level)
 
-    profiles_df = pd.DataFrame({
-        "customer_id": products.index.astype(int),
-        "products": products.values,
-        "country": country.values,
-        "total_spent": total_spent.values,
-        "purchase_frequency": purchase_frequency.values,
-        "avg_spend_per_product": avg_spend_per_product.values,
-        "unique_products_count": unique_products_count.values
-    }).reset_index(drop=True)
+    if not args.input.exists():
+        raise FileNotFoundError(f"{args.input} not found.")
 
-    return profiles_df.to_dict(orient="records")
+    logging.info("Loading raw CSV: %s", args.input)
+    raw = read_csv_robust(args.input)
+    logging.info("Raw shape: %s", raw.shape)
 
-def main():
-    file_path = "data.csv"  # raw file
-    cleaned_data = load_and_clean_data(file_path)
+    cleaned = clean_dataframe(raw)
+    logging.info("Cleaned shape: %s", cleaned.shape)
 
-    customer_profiles = aggregate_customer_data(cleaned_data)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    cleaned.to_csv(args.output, index=False)
+    logging.info("Wrote cleaned CSV -> %s", args.output)
 
-    # Save cleaned data for embedding step
-    output_path = "cleaned_data.csv"
-    cleaned_data.to_csv(output_path, index=False)
-    print(f"✅ Saved cleaned data to {output_path}")
+    # Useful preview
+    try:
+        summary = cleaned.agg({"Quantity": ["sum", "mean"], "UnitPrice": ["mean"], "TotalSpend": ["sum", "mean"]})
+        print("\n=== Data Summary ===")
+        print(summary.to_string())
+    except Exception:
+        pass
 
-    print(f"Created {len(customer_profiles)} customer profiles")
-    if customer_profiles:
-        print("\nSample customer profile:")
-        print(customer_profiles[0])
-
-    return customer_profiles, cleaned_data
 
 if __name__ == "__main__":
-    profiles, data = main()
+    main()
