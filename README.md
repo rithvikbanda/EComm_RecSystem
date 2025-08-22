@@ -1,6 +1,6 @@
 # 🛒 E-commerce Recommendation Engine
-A recommendation system built end-to-end with **Python, FAISS, Sentence Transformers, and Streamlit**, based on invoice-based E-commerce data.
 ---
+An end-to-end recommendation system for invoice-based e-commerce data, built with Python, FAISS, Sentence Transformers, and Streamlit.
 ## Description
 This project was designed to mirror production-style considerations in building a recommender system: we began by cleaning raw invoice data to ensure reliability, then generated semantic embeddings with Sentence Transformers to capture product meaning beyond keywords, and indexed them with FAISS for fast, scalable retrieval. To make customer profiles realistic, we weighted purchase histories using log-scaled quantity to prevent bulk orders from dominating, recency decay to emphasize recent behavior, and inverse popularity to highlight niche preferences. For recommendations, we added options to filter out already purchased items and applied Maximal Marginal Relevance (MMR) to balance relevance with diversity, ensuring users don’t only see near-duplicate products (e.g., multiple t-shirts from the same brand). Finally, we built a simple Streamlit UI that demonstrates these core functionalities in an interactive way.
 
@@ -66,6 +66,18 @@ Open [http://localhost:8501](http://localhost:8501) to try:
 
 ---
 
+## 🎥 Demo
+
+### Text Search
+![Text Search Demo](assets/demo_search.gif)
+
+### Similar Products
+![Similar Products Demo](assets/demo_similar.gif)
+
+### Customer Recommendations
+![Customer Recs Demo](assets/demo_recs.gif)
+
+---
 # How the UI Tabs Work
 
 ## 1) Text Search (semantic search over products)
@@ -120,7 +132,6 @@ flowchart TD
     N --> P[Personalized Top-K recommendations]
     O --> P
 ```
-*(Note: Avoid parentheses in node labels on GitHub Mermaid. Use simple text like "exclude self" instead of "(exclude self)".)*
 
 ---
 
