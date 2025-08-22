@@ -1,7 +1,8 @@
 # 🛒 E-commerce Recommendation Engine
 A recommendation system built end-to-end with **Python, FAISS, Sentence Transformers, and Streamlit**, based on invoice-based E-commerce data.
-
 ---
+## Description
+This project was designed to mirror production-style considerations in building a recommender system: we began by cleaning raw invoice data to ensure reliability, then generated semantic embeddings with Sentence Transformers to capture product meaning beyond keywords, and indexed them with FAISS for fast, scalable retrieval. To make customer profiles realistic, we weighted purchase histories using log-scaled quantity to prevent bulk orders from dominating, recency decay to emphasize recent behavior, and inverse popularity to highlight niche preferences. For recommendations, we added options to filter out already purchased items and applied Maximal Marginal Relevance (MMR) to balance relevance with diversity, ensuring users don’t only see near-duplicate products (e.g., multiple t-shirts from the same brand). Finally, we built a simple Streamlit UI that demonstrates these core functionalities in an interactive way.
 
 ## Features
 - **Data pipeline** → Cleans raw transactions into structured format  
@@ -9,16 +10,6 @@ A recommendation system built end-to-end with **Python, FAISS, Sentence Transfor
 - **Vector search** → FAISS index for fast similarity & product recommendations  
 - **Advanced weighting** → Combines log-scaled quantity, recency decay, and inverse popularity for accurate recommendations  
 - **Demo UI** → Interactive Streamlit app (text search, similar items, customer recs)  
-
----
-
-## Tech Used
-- **Python 3.11** – main language  
-- **Pandas / NumPy** – data cleaning & aggregation  
-- **Sentence Transformers (Hugging Face)** – semantic embeddings  
-- **FAISS (Facebook AI Similarity Search)** – vector search & similarity  
-- **Streamlit** – interactive demo UI  
-- **Makefile** – reproducible pipeline orchestration  
 
 ---
 
@@ -75,6 +66,125 @@ Open [http://localhost:8501](http://localhost:8501) to try:
 
 ---
 
-##  Architecture
+# How the UI Tabs Work
 
+## 1) Text Search (semantic search over products)
+**Pipeline**
+1. User enters a query (e.g., "Red Umbrella").
+2. The app encodes the text with the same Sentence Transformer used for products.
+3. We search the FAISS index.
+4. Top-K product rows are returned with similarity scores.
+
+---
+
+## 2) Similar Products (more-like-this by StockCode)
+**Pipeline**
+1. User enters a `StockCode`.
+2. We grab that product's vector from the product embedding matrix.
+3. Run nearest-neighbor search in FAISS against all other products.
+4. Return Top-K most similar items (excluding the product itself).
+
+---
+
+## 3) Customer Recs (personalized recommendations)
+**Pipeline**
+1. User enters a `CustomerID`.
+2. We fetch the customer's embedding (weighted average of purchased product vectors: log-quantity, recency decay, inverse-popularity).
+3. Candidate pool = all products (optionally filter out already purchased items).
+4. Retrieve Top-N with FAISS, then optionally diversify with MMR (Maximal Marginal Relevance) to avoid near-duplicates.
+5. Return Top-K recommended items.
+
+---
+
+## Flow Diagram (high level)
+
+```mermaid
+flowchart TD
+    A[User in Streamlit UI] -->|Text query| B[Encode with Sentence Transformer]
+    B --> C[FAISS search over product embeddings]
+    C --> D[Top-K products]
+
+    A -->|StockCode| E[Lookup product embedding]
+    E --> F[FAISS search exclude self]
+    F --> G[Top-K similar products]
+
+    A -->|CustomerID| H[Load customer embedding]
+    H --> I{Filter purchased?}
+    I -->|Yes| J[Mask purchased stock codes]
+    I -->|No| K[Use all products]
+    J --> L[FAISS search on filtered set]
+    K --> L
+    L --> M{Diversify with MMR?}
+    M -->|Yes| N[MMR re-rank for diversity]
+    M -->|No| O[Take Top-K by score]
+    N --> P[Personalized Top-K recommendations]
+    O --> P
+```
+*(Note: Avoid parentheses in node labels on GitHub Mermaid. Use simple text like "exclude self" instead of "(exclude self)".)*
+
+---
+
+## Sequence Diagrams
+
+### Text Search
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant UI as Streamlit UI
+    participant ENC as Text Encoder
+    participant IDX as FAISS Index
+    participant META as products_meta.csv
+
+    U->>UI: Enter query
+    UI->>ENC: Encode query to vector
+    ENC-->>UI: q_vec
+    UI->>IDX: Search(q_vec, K)
+    IDX-->>UI: indices + scores
+    UI->>META: Map indices to rows
+    UI-->>U: Show Top-K results
+```
+
+### Similar Products
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant UI as Streamlit UI
+    participant MAT as Product Embedding Matrix
+    participant IDX as FAISS Index
+    participant META as products_meta.csv
+
+    U->>UI: Enter StockCode
+    UI->>META: Find row by StockCode
+    UI->>MAT: Get product vector p_vec
+    UI->>IDX: Search(p_vec, K+1)
+    IDX-->>UI: indices + scores (includes self)
+    UI->>UI: Drop the query product
+    UI->>META: Map indices to rows
+    UI-->>U: Show Top-K similar items
+```
+
+### Customer Recommendations
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant UI as Streamlit UI
+    participant CEMB as Customer Embeddings
+    participant CLEAN as cleaned_data.csv
+    participant META as products_meta.csv
+    participant IDX as FAISS Index
+
+    U->>UI: Enter CustomerID and options
+    UI->>CEMB: Load customer vector c_vec
+    alt Filter purchased
+        UI->>CLEAN: Look up purchased StockCodes
+        UI->>META: Mask purchased from candidates
+    end
+    UI->>IDX: Search(c_vec, N) on candidate set
+    IDX-->>UI: candidate indices + scores
+    alt Diversify
+        UI->>UI: Apply MMR re-rank
+    end
+    UI->>META: Map final indices to rows
+    UI-->>U: Show Top-K recommendations
+```
 
