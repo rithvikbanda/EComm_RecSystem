@@ -20,7 +20,7 @@ artifacts/            # generated embeddings & metadata
 cleandata.py          # data cleaning pipeline
 embed_products.py     # product embeddings
 embed_customers.py    # customer embeddings
-rag_search.py         # search + recommendation logic
+vector_search.py         # search + recommendation logic
 app.py                # Streamlit demo UI
 Makefile              # one-command pipeline 
 requirements.txt      # UI + pipeline deps
