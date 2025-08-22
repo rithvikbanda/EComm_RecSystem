@@ -108,7 +108,7 @@ Open [http://localhost:8501](http://localhost:8501) to try:
 
 ---
 
-## Flow Diagram (high level)
+## Flow Diagram 
 
 ```mermaid
 flowchart TD
